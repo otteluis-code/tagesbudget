@@ -12,6 +12,7 @@ Einfache Web-App, um tägliche Ausgaben zu tracken.
   Beispiel: Dienstag nur 10 € ausgegeben → Wochenende hat 55 €.
 - Überziehst du an einem Werktag, wird die Differenz vom Wochenende abgezogen.
 - Jeden Montag startet eine neue Woche.
+- Gerechnet wird ab dem Tag, an dem du die App zum ersten Mal öffnest (oder ab deinem frühesten nachgetragenen Eintrag).
 
 Beide Beträge lassen sich in den Einstellungen ändern.
 

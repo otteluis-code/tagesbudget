@@ -87,21 +87,27 @@ function parseAmount(raw) {
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ============ Speicher ============ */
-const validEntry = e => e && typeof e.id === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date) && Number.isInteger(e.amount) && e.amount > 0;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const validEntry = e => e && typeof e.id === 'string' && DATE_RE.test(e.date) && Number.isInteger(e.amount) && e.amount > 0;
 
 function sanitize(data) {
   const s = data && data.settings || {};
+  const entries = Array.isArray(data && data.entries) ? data.entries.filter(validEntry).map(e => ({
+    id: e.id, date: e.date, amount: e.amount,
+    cat: CAT[e.cat] ? e.cat : 'sonstiges',
+    note: typeof e.note === 'string' ? e.note.slice(0, 60) : '',
+    ts: Number.isFinite(e.ts) ? e.ts : dateOf(e.date).getTime(),
+  })) : [];
+  // Ab diesem Tag wird gerechnet – Tage davor zählen weder als gespart noch als überzogen.
+  const earliest = entries.reduce((min, e) => (e.date < min ? e.date : min), todayKey());
+  const since = data && DATE_RE.test(data.since) && data.since < earliest ? data.since : earliest;
   return {
     settings: {
       daily: Number.isInteger(s.daily) && s.daily > 0 ? s.daily : DEFAULTS.daily,
       weekend: Number.isInteger(s.weekend) && s.weekend >= 0 ? s.weekend : DEFAULTS.weekend,
     },
-    entries: Array.isArray(data && data.entries) ? data.entries.filter(validEntry).map(e => ({
-      id: e.id, date: e.date, amount: e.amount,
-      cat: CAT[e.cat] ? e.cat : 'sonstiges',
-      note: typeof e.note === 'string' ? e.note.slice(0, 60) : '',
-      ts: Number.isFinite(e.ts) ? e.ts : dateOf(e.date).getTime(),
-    })) : [],
+    since,
+    entries,
     lastCat: data && CAT[data.lastCat] ? data.lastCat : 'essen',
   };
 }
@@ -156,20 +162,21 @@ function weekInfo(monday) {
   const { daily, weekend } = state.settings;
   const today = ui.today;
   const days = [];
-  let saved = 0, total = 0;
+  let saved = 0, total = 0, budget = 0;
   for (let i = 0; i < 7; i++) {
     const d = addDays(monday, i), k = keyOf(d), spent = sums.get(k) || 0;
-    const day = { d, k, spent, done: k < today, isToday: k === today, future: k > today };
+    const day = { d, k, spent, done: k < today, isToday: k === today, future: k > today, tracked: k >= state.since };
     days.push(day);
     total += spent;
-    if (i < 5 && day.done) saved += daily - spent;
+    if (i < 5 && day.tracked) budget += daily;
+    if (i < 5 && day.done && day.tracked) saved += daily - spent;
   }
+  if (days[6].tracked) budget += weekend;
   const pool = weekend + saved;
   const weekendSpent = days[5].spent + days[6].spent;
   return {
-    monday, days, saved, pool, weekendSpent, total,
+    monday, days, saved, pool, weekendSpent, total, budget,
     weekendLeft: pool - weekendSpent,
-    budget: 5 * daily + weekend,
     past: days[6].k < today,
     current: days[0].k <= today && today <= days[6].k,
   };
@@ -179,16 +186,18 @@ function monthInfo(y, m) {
   const { daily, weekend } = state.settings;
   const count = new Date(y, m + 1, 0).getDate();
   const days = [];
-  let spent = 0, budget = 0, elapsedBudget = 0, elapsedDays = 0;
+  let spent = 0, budget = 0, elapsedBudget = 0, elapsedDays = 0, remaining = 0;
   for (let i = 1; i <= count; i++) {
     const d = new Date(y, m, i), k = keyOf(d), s = sums.get(k) || 0, we = isWeekendDay(d);
-    const b = we ? weekend / 2 : daily;
+    const tracked = k >= state.since;
+    const b = !tracked ? 0 : we ? weekend / 2 : daily;
     spent += s;
     budget += b;
-    if (k <= ui.today) { elapsedBudget += b; elapsedDays++; }
+    if (tracked && k <= ui.today) { elapsedBudget += b; elapsedDays++; }
+    if (k > ui.today) remaining++;
     days.push({ d, k, s, we });
   }
-  return { days, spent, budget: Math.round(budget), elapsedBudget: Math.round(elapsedBudget), elapsedDays };
+  return { days, spent, budget: Math.round(budget), elapsedBudget: Math.round(elapsedBudget), elapsedDays, remaining };
 }
 
 /* ============ Bausteine ============ */
@@ -249,9 +258,9 @@ function stripHTML(info) {
     const pct = Math.min(100, day.spent / daily * 100);
     const delta = daily - day.spent;
     let deltaHTML = '<span class="delta">&nbsp;</span>';
-    if (day.done) deltaHTML = `<span class="delta ${delta >= 0 ? 'pos' : 'neg'}">${numDelta(delta)}</span>`;
+    if (day.done && day.tracked) deltaHTML = `<span class="delta ${delta >= 0 ? 'pos' : 'neg'}">${numDelta(delta)}</span>`;
     else if (day.isToday) deltaHTML = '<span class="delta">heute</span>';
-    return `<div class="col${day.isToday ? ' is-today' : ''}${day.future ? ' is-future' : ''}">
+    return `<div class="col${day.isToday ? ' is-today' : ''}${day.future || !day.tracked ? ' is-future' : ''}">
       <div class="bar"><span class="${day.spent > daily ? 'over' : ''}" style="height:${pct.toFixed(1)}%;${day.spent ? 'min-height:3px' : ''}"></span></div>
       <b>${day.spent ? num(day.spent) : '–'}</b>
       <small>${WD_SHORT[day.d.getDay()]}</small>
@@ -353,8 +362,9 @@ function renderWeek() {
 
   const calcRows = info.days.slice(0, 5).map(day => {
     const name = WD_LONG[day.d.getDay()];
-    if (!day.done) {
-      return `<div class="calc-row muted"><span>${name}</span><span>${day.isToday ? 'läuft noch' : 'kommt noch'}</span></div>`;
+    if (!day.done || !day.tracked) {
+      const why = !day.tracked ? 'vor deinem Start' : day.isToday ? 'läuft noch' : 'kommt noch';
+      return `<div class="calc-row muted"><span>${name}</span><span>${why}</span></div>`;
     }
     const delta = daily - day.spent;
     return `<div class="calc-row"><span>${name} <small>· ${fmt(day.spent)} ausgegeben</small></span><b class="${delta >= 0 ? 'pos' : 'neg'}">${fmtDelta(delta)}</b></div>`;
@@ -432,7 +442,7 @@ function renderMonth() {
       <div class="tile"><small>Ausgegeben</small><b>${fmt(info.spent)}</b><small>von ${fmt(info.budget)} Budget</small></div>
       <div class="tile ${saved < 0 ? 'bad' : 'good'}"><small>${saved < 0 ? 'Überzogen' : 'Gespart'}</small><b>${fmt(Math.abs(saved))}</b><small>${isCurrent ? 'bis heute' : 'im ganzen Monat'}</small></div>
       <div class="tile"><small>Ø pro Tag</small><b>${fmt(Math.round(avg))}</b><small>über ${info.elapsedDays} ${info.elapsedDays === 1 ? 'Tag' : 'Tage'}</small></div>
-      <div class="tile"><small>Noch frei im Monat</small><b class="${info.budget - info.spent < 0 ? 'neg' : ''}">${fmt(info.budget - info.spent)}</b><small>${isCurrent ? `${info.days.length - info.elapsedDays} Tage übrig` : 'abgeschlossen'}</small></div>
+      <div class="tile"><small>Noch frei im Monat</small><b class="${info.budget - info.spent < 0 ? 'neg' : ''}">${fmt(info.budget - info.spent)}</b><small>${isCurrent ? `${info.remaining} ${info.remaining === 1 ? 'Tag' : 'Tage'} übrig` : 'abgeschlossen'}</small></div>
     </div>
     <section class="card">
       <div class="cal">${cells}</div>
@@ -516,6 +526,7 @@ $('addForm').addEventListener('submit', e => {
   const entry = { id: uid(), date: ui.addDate, amount, cat: ui.addCat, note: $('noteInput').value.trim(), ts: Date.now() };
   state.entries.push(entry);
   state.lastCat = ui.addCat;
+  if (entry.date < state.since) state.since = entry.date;
   save();
   $('amountInput').value = '';
   $('noteInput').value = '';
@@ -561,7 +572,8 @@ $('editForm').addEventListener('submit', e => {
   entry.amount = amount;
   entry.cat = ui.editCat;
   entry.note = $('editNote').value.trim().slice(0, 60);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(date) && date <= ui.today) entry.date = date;
+  if (DATE_RE.test(date) && date <= ui.today) entry.date = date;
+  if (entry.date < state.since) state.since = entry.date;
   save();
   $('editSheet').close();
   render();
@@ -787,6 +799,7 @@ window.addEventListener('storage', e => {
 });
 
 /* ============ Start ============ */
+save(); // legt beim ersten Öffnen den Starttag fest
 render();
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});

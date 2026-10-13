@@ -1,5 +1,5 @@
 // Offline-Unterstützung: erst Netz (damit Updates sofort ankommen), sonst Cache.
-const CACHE = 'tagesbudget-v1';
+const CACHE = 'tagesbudget-v2';
 const ASSETS = [
   './',
   './index.html',
